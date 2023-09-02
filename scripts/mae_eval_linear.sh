@@ -1,0 +1,1 @@
+ python main_linprobe.py --data_path data --batch-size 256 --lr 1e-4  --epoch 100

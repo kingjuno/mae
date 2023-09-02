@@ -34,7 +34,7 @@ from util.datasets import build_dataset
 from util.pos_embed import interpolate_pos_embed
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-import models_vit
+import models_deit
 
 from engine_finetune import train_one_epoch, evaluate
 
@@ -51,7 +51,7 @@ def get_args_parser():
     parser.add_argument('--model', default='vit_large_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
 
-    parser.add_argument('--input_size', default=224, type=int,
+    parser.add_argument('--input_size', default=32, type=int,
                         help='images input size')
 
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
@@ -224,19 +224,22 @@ def main(args):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
     
-    model = models_vit.__dict__[args.model](
-        num_classes=args.nb_classes,
-        drop_path_rate=args.drop_path,
-        global_pool=args.global_pool,
+    # model = models_vit.__dict__[args.model](
+    #     num_classes=args.nb_classes,
+    #     drop_path_rate=args.drop_path,
+    #     global_pool=args.global_pool,
+    # )
+    model = models_deit.deit_tiny_distilled_patch16_224(
+        img_size=args.input_size,
+        patch_size=args.patch_size,
     )
-
     if args.finetune and not args.eval:
         checkpoint = torch.load(args.finetune, map_location='cpu')
 
         print("Load pre-trained checkpoint from: %s" % args.finetune)
         checkpoint_model = checkpoint['model']
         state_dict = model.state_dict()
-        for k in ['head.weight', 'head.bias']:
+        for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
             if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
                 print(f"Removing key {k} from pretrained checkpoint")
                 del checkpoint_model[k]
@@ -251,7 +254,7 @@ def main(args):
         if args.global_pool:
             assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias'}
         else:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
+            assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias'}
 
         # manually initialize fc layer
         trunc_normal_(model.head.weight, std=2e-5)

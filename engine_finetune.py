@@ -28,6 +28,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     mixup_fn: Optional[Mixup] = None, log_writer=None,
                     args=None):
     model.train(True)
+    model.training = True
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
@@ -54,7 +55,14 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         with torch.cuda.amp.autocast():
             outputs = model(samples)
-            loss = criterion(outputs, targets)
+            if not args.cosub:
+                loss = criterion(samples, outputs, targets)
+            else:
+                outputs = torch.split(outputs, outputs.shape[0]//2, dim=0)
+                loss = 0.25 * criterion(outputs[0], targets) 
+                loss = loss + 0.25 * criterion(outputs[1], targets) 
+                loss = loss + 0.25 * criterion(outputs[0], outputs[1].detach().sigmoid())
+                loss = loss + 0.25 * criterion(outputs[1], outputs[0].detach().sigmoid()) 
 
         loss_value = loss.item()
 
@@ -104,7 +112,7 @@ def evaluate(data_loader, model, device):
 
     # switch to evaluation mode
     model.eval()
-
+    model.training = False
     for batch in metric_logger.log_every(data_loader, 10, header):
         images = batch[0]
         target = batch[-1]
