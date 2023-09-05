@@ -26,7 +26,7 @@ class MaskedAutoencoderDeiT(nn.Module):
 
     def __init__(self, img_size=32, patch_size=4, in_chans=3,
                  embed_dim=192, depth=12, num_heads=3,
-                 decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=8,
+                 decoder_embed_dim=96, decoder_depth=4, decoder_num_heads=3,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False):
         super().__init__()
         # --------------------------------------------------------------------------
