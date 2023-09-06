@@ -26,15 +26,17 @@ import torchvision.datasets as datasets
 import timm
 
 assert timm.__version__ == "0.3.2" # version check
+from timm.loss import LabelSmoothingCrossEntropy
 from timm.models.layers import trunc_normal_
 
 import util.misc as misc
+from util.losses import DistillationLoss
 from util.pos_embed import interpolate_pos_embed
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from util.lars import LARS
 from util.crop import RandomResizedCrop
 
-import models_vit
+import models_deit
 
 from engine_finetune import train_one_epoch, evaluate
 
@@ -46,12 +48,19 @@ def get_args_parser():
     parser.add_argument('--epochs', default=90, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
-
+    parser.add_argument('--input_size', default=32, type=int,
+                        help='Input image size')
+    parser.add_argument('--patch_size', default=4, type=int,
+                        help='Patch size')
     # Model parameters
     parser.add_argument('--model', default='vit_large_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
 
     # Optimizer parameters
+    parser.add_argument('--cosub', action='store_true')
+    parser.add_argument('--distillation-type', default='none', choices=['none', 'soft', 'hard'], type=str, help="")
+    parser.add_argument('--distillation-alpha', default=0.5, type=float, help="")
+    parser.add_argument('--distillation-tau', default=1.0, type=float, help="")
     parser.add_argument('--weight_decay', type=float, default=0,
                         help='weight decay (default: 0 for linear probe following MoCo v1)')
 
@@ -129,20 +138,39 @@ def main(args):
     cudnn.benchmark = True
 
     # linear probe: weak augmentation
+    # transform_train = transforms.Compose([
+    #         RandomResizedCrop(224, interpolation=3),
+    #         transforms.RandomHorizontalFlip(),
+    #         transforms.ToTensor(),
+    #         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    # transform_val = transforms.Compose([
+    #         transforms.Resize(256, interpolation=3),
+    #         transforms.CenterCrop(224),
+    #         transforms.ToTensor(),
+    #         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     transform_train = transforms.Compose([
-            RandomResizedCrop(224, interpolation=3),
+            # transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+            # https://stackoverflow.com/questions/69747119/pytorch-cifar10-images-are-not-normalized
+            # mean = [0.4914, 0.4822, 0.4465]
+            # std = [0.2470, 0.2435, 0.2616]
+            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])])
     transform_val = transforms.Compose([
-            transforms.Resize(256, interpolation=3),
-            transforms.CenterCrop(224),
+            # transforms.Resize(args.input_size, interpolation=3),
+            # transforms.CenterCrop(args.input_size),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-    dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
+            # https://stackoverflow.com/questions/69747119/pytorch-cifar10-images-are-not-normalized
+            # mean = [0.4914, 0.4822, 0.4465]
+            # std = [0.2470, 0.2435, 0.2616]
+            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])])
+    dataset_train = datasets.CIFAR10(root=args.data_path, train=True, download=True, transform=transform_train)
+    dataset_val = datasets.CIFAR10(root=args.data_path, train=False, download=True, transform=transform_val)
     print(dataset_train)
-    print(dataset_val)
+    # dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+    # dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
+    # print(dataset_train)
+    # print(dataset_val)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -186,9 +214,14 @@ def main(args):
         drop_last=False
     )
 
-    model = models_vit.__dict__[args.model](
+    # model = models_vit.__dict__[args.model](
+    #     num_classes=args.nb_classes,
+    #     global_pool=args.global_pool,
+    # )
+    model = models_deit.deit_tiny_distilled_patch16_224(
+        img_size=args.input_size,
+        patch_size=args.patch_size,
         num_classes=args.nb_classes,
-        global_pool=args.global_pool,
     )
 
     if args.finetune and not args.eval:
@@ -197,7 +230,7 @@ def main(args):
         print("Load pre-trained checkpoint from: %s" % args.finetune)
         checkpoint_model = checkpoint['model']
         state_dict = model.state_dict()
-        for k in ['head.weight', 'head.bias']:
+        for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
             if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
                 print(f"Removing key {k} from pretrained checkpoint")
                 del checkpoint_model[k]
@@ -212,7 +245,7 @@ def main(args):
         if args.global_pool:
             assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias'}
         else:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
+            assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias'}
 
         # manually initialize fc layer: following MoCo v3
         trunc_normal_(model.head.weight, std=0.01)
@@ -220,10 +253,13 @@ def main(args):
     # for linear prob only
     # hack: revise model's head with BN
     model.head = torch.nn.Sequential(torch.nn.BatchNorm1d(model.head.in_features, affine=False, eps=1e-6), model.head)
+    model.head_dist = torch.nn.Sequential(torch.nn.BatchNorm1d(model.head_dist.in_features, affine=False, eps=1e-6), model.head_dist)
     # freeze all but the head
     for _, p in model.named_parameters():
         p.requires_grad = False
     for _, p in model.head.named_parameters():
+        p.requires_grad = True
+    for _, p in model.head_dist.named_parameters():
         p.requires_grad = True
 
     model.to(device)
@@ -249,11 +285,15 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
-    optimizer = LARS(model_without_ddp.head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # optimizer = LARS(model_without_ddp.head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(model_without_ddp.head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     print(optimizer)
     loss_scaler = NativeScaler()
+    criterion = LabelSmoothingCrossEntropy()
 
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = DistillationLoss(
+        criterion, None, args.distillation_type, args.distillation_alpha, args.distillation_tau
+    )
 
     print("criterion = %s" % str(criterion))
 
