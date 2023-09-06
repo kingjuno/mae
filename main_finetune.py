@@ -232,6 +232,7 @@ def main(args):
     model = models_deit.deit_tiny_distilled_patch16_224(
         img_size=args.input_size,
         patch_size=args.patch_size,
+        num_classes=args.nb_classes,
     )
     if args.finetune and not args.eval:
         checkpoint = torch.load(args.finetune, map_location='cpu')
