@@ -21,6 +21,9 @@ import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 
+import torchvision
+from torchvision import transforms
+
 import timm
 
 assert timm.__version__ == "0.3.2" # version check
@@ -28,13 +31,14 @@ from timm.models.layers import trunc_normal_
 from timm.data.mixup import Mixup
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 
+from util.losses import DistillationLoss
 import util.lr_decay as lrd
 import util.misc as misc
 from util.datasets import build_dataset
 from util.pos_embed import interpolate_pos_embed
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-import models_vit
+import models_deit
 
 from engine_finetune import train_one_epoch, evaluate
 
@@ -51,8 +55,10 @@ def get_args_parser():
     parser.add_argument('--model', default='vit_large_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
 
-    parser.add_argument('--input_size', default=224, type=int,
+    parser.add_argument('--input_size', default=32, type=int,
                         help='images input size')
+    parser.add_argument('--patch_size', default=4, type=int,
+                        help='patch size')
 
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
                         help='Drop path rate (default: 0.1)')
@@ -107,12 +113,17 @@ def get_args_parser():
                         help='Probability of switching to cutmix when both mixup and cutmix enabled')
     parser.add_argument('--mixup_mode', type=str, default='batch',
                         help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
+    # DeiT
+    parser.add_argument('--cosub', action='store_true')
+    parser.add_argument('--distillation-type', default='none', choices=['none', 'soft', 'hard'], type=str, help="")
+    parser.add_argument('--distillation-alpha', default=0.5, type=float, help="")
+    parser.add_argument('--distillation-tau', default=1.0, type=float, help="")
 
     # * Finetuning params
     parser.add_argument('--finetune', default='',
                         help='finetune from checkpoint')
     parser.add_argument('--global_pool', action='store_true')
-    parser.set_defaults(global_pool=True)
+    parser.set_defaults(global_pool=False)
     parser.add_argument('--cls_token', action='store_false', dest='global_pool',
                         help='Use class token instead of global pool for classification')
 
@@ -170,8 +181,29 @@ def main(args):
 
     cudnn.benchmark = True
 
-    dataset_train = build_dataset(is_train=True, args=args)
-    dataset_val = build_dataset(is_train=False, args=args)
+    # dataset_train = build_dataset(is_train=True, args=args)
+    # dataset_val = build_dataset(is_train=False, args=args)
+    # cifar10
+    transform_train = transforms.Compose([
+            # transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
+            # transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            # https://stackoverflow.com/questions/69747119/pytorch-cifar10-images-are-not-normalized
+            # mean = [0.4914, 0.4822, 0.4465]
+            # std = [0.2470, 0.2435, 0.2616]
+            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])])
+    transform_test = transforms.Compose([
+            # transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
+            # transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            # https://stackoverflow.com/questions/69747119/pytorch-cifar10-images-are-not-normalized
+            # mean = [0.4914, 0.4822, 0.4465]
+            # std = [0.2470, 0.2435, 0.2616]
+            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])])
+    dataset_train = torchvision.datasets.CIFAR10(
+        root=args.data_path, train=True, download=True, transform=transform_train)
+    dataset_val = torchvision.datasets.CIFAR10(
+        root=args.data_path, train=False, download=True, transform=transform_test)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -224,19 +256,23 @@ def main(args):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
     
-    model = models_vit.__dict__[args.model](
+    # model = models_vit.__dict__[args.model](
+    #     num_classes=args.nb_classes,
+    #     drop_path_rate=args.drop_path,
+    #     global_pool=args.global_pool,
+    # )
+    model = models_deit.deit_tiny_distilled_patch16_224(
+        img_size=args.input_size,
+        patch_size=args.patch_size,
         num_classes=args.nb_classes,
-        drop_path_rate=args.drop_path,
-        global_pool=args.global_pool,
     )
-
     if args.finetune and not args.eval:
         checkpoint = torch.load(args.finetune, map_location='cpu')
 
         print("Load pre-trained checkpoint from: %s" % args.finetune)
         checkpoint_model = checkpoint['model']
         state_dict = model.state_dict()
-        for k in ['head.weight', 'head.bias']:
+        for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
             if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
                 print(f"Removing key {k} from pretrained checkpoint")
                 del checkpoint_model[k]
@@ -249,9 +285,9 @@ def main(args):
         print(msg)
 
         if args.global_pool:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias'}
+            assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias', 'head_dist.weight', 'head_dist.bias'}
         else:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
+            assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias'}
 
         # manually initialize fc layer
         trunc_normal_(model.head.weight, std=2e-5)
@@ -294,6 +330,10 @@ def main(args):
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
         criterion = torch.nn.CrossEntropyLoss()
+
+    criterion = DistillationLoss(
+        criterion, None, args.distillation_type, args.distillation_alpha, args.distillation_tau
+    )
 
     print("criterion = %s" % str(criterion))
 
