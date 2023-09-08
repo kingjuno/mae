@@ -56,20 +56,11 @@ def get_args_parser():
     parser.add_argument('--model', default='vit_large_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
 
-    parser.add_argument('--input_size', default=32, type=int,
-                        help='images input size')
-    
-    parser.add_argument('--patch_size', default=4, type=int,
-                        help='patch size')
     parser.add_argument('--cosub', action='store_true')
     parser.add_argument('--distillation-type', default='none', choices=['none', 'soft', 'hard'], type=str, help="")
     parser.add_argument('--distillation-alpha', default=0.5, type=float, help="")
     parser.add_argument('--distillation-tau', default=1.0, type=float, help="")
     # Optimizer parameters
-    parser.add_argument('--cosub', action='store_true')
-    parser.add_argument('--distillation-type', default='none', choices=['none', 'soft', 'hard'], type=str, help="")
-    parser.add_argument('--distillation-alpha', default=0.5, type=float, help="")
-    parser.add_argument('--distillation-tau', default=1.0, type=float, help="")
     parser.add_argument('--weight_decay', type=float, default=0,
                         help='weight decay (default: 0 for linear probe following MoCo v1)')
 
