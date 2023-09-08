@@ -1,1 +1,9 @@
-python main_pretrain.py --data_path data --epoch 100 --batch-size 256 --lr 1e-4 
+python main_pretrain.py \
+    --data_path data \
+    --batch_size 256 \
+    --epochs 200 \
+    --accum_iter 1 \
+    --input_size 32 \
+    --patch_size 4 \
+    --norm_pix_loss \
+    --lr 1e-3  

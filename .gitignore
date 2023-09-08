@@ -1,11 +1,5 @@
 data/
 env/
-<<<<<<< HEAD
 __pycache__/
 *.py[cod]
 output_dir/
-=======
-*.pyc
-__pycache__/
-output_dir/
->>>>>>> bootstrap-test
