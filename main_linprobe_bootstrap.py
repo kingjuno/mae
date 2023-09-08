@@ -48,7 +48,10 @@ def get_args_parser():
     parser.add_argument('--epochs', default=90, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
-
+    parser.add_argument('--input_size', default=32, type=int,
+                        help='Input image size')
+    parser.add_argument('--patch_size', default=4, type=int,
+                        help='Patch size')
     # Model parameters
     parser.add_argument('--model', default='vit_large_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
@@ -63,6 +66,10 @@ def get_args_parser():
     parser.add_argument('--distillation-alpha', default=0.5, type=float, help="")
     parser.add_argument('--distillation-tau', default=1.0, type=float, help="")
     # Optimizer parameters
+    parser.add_argument('--cosub', action='store_true')
+    parser.add_argument('--distillation-type', default='none', choices=['none', 'soft', 'hard'], type=str, help="")
+    parser.add_argument('--distillation-alpha', default=0.5, type=float, help="")
+    parser.add_argument('--distillation-tau', default=1.0, type=float, help="")
     parser.add_argument('--weight_decay', type=float, default=0,
                         help='weight decay (default: 0 for linear probe following MoCo v1)')
 
@@ -172,7 +179,10 @@ def main(args):
     dataset_train = datasets.CIFAR10(root=args.data_path, train=True, download=True, transform=transform_train)
     dataset_val = datasets.CIFAR10(root=args.data_path, train=False, download=True, transform=transform_val)
     print(dataset_train)
-    print(dataset_val)
+    # dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+    # dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
+    # print(dataset_train)
+    # print(dataset_val)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
